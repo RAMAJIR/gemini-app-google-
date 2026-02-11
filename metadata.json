@@ -1,0 +1,5 @@
+{
+  "name": "Copy of Supplier Matcher AI",
+  "description": "An automated supplier verification tool that processes CSV records, filters for review items, and uses Gemini with Google Search to cross-reference LS and DBM supplier identities.",
+  "requestFramePermissions": []
+}
