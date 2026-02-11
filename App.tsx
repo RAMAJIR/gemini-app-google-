@@ -8,23 +8,59 @@ import AutomationScript from './components/AutomationScript';
 import { SupplierRow, MatchResult } from './types';
 import { analyzeSupplierPair } from './services/geminiService';
 
-// Helper to find column values regardless of case or extra spaces
+// Helper to find column values regardless of case, extra spaces, or varied naming conventions
 const getVal = (row: any, targets: string[]) => {
   const keys = Object.keys(row);
+  
+  // 1. Try exact match first (case-insensitive)
   for (const target of targets) {
-    const found = keys.find(k => k.toLowerCase().trim().includes(target.toLowerCase()));
-    if (found && row[found]) return row[found];
+    const found = keys.find(k => k.toLowerCase().trim() === target.toLowerCase());
+    if (found && row[found] !== undefined && row[found] !== null && row[found] !== "") {
+      return String(row[found]).trim();
+    }
   }
+  
+  // 2. Try partial match (if header contains target OR target contains header)
+  for (const target of targets) {
+    const found = keys.find(k => {
+      const cleanK = k.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+      const cleanT = target.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return cleanK.includes(cleanT) || cleanT.includes(cleanK);
+    });
+    if (found && row[found] !== undefined && row[found] !== null && row[found] !== "") {
+      return String(row[found]).trim();
+    }
+  }
+
   return "";
 };
 
 const parseCSV = (text: string): SupplierRow[] => {
-  const lines = text.split('\n');
+  // Split by newline and filter out empty lines, also handling Windows \r\n
+  const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
   if (lines.length < 1) return [];
+  
   const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
   
-  return lines.slice(1).filter(line => line.trim()).map(line => {
-    const values = line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+  return lines.slice(1).map(line => {
+    // Simple CSV parser that handles quoted values with commas
+    const values: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        values.push(current.trim().replace(/^"|"$/g, ''));
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    values.push(current.trim().replace(/^"|"$/g, ''));
+
     const obj: any = {};
     headers.forEach((header, i) => {
       obj[header] = values[i] || "";
@@ -41,12 +77,10 @@ const App: React.FC = () => {
   const [results, setResults] = useState<MatchResult[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // Use refs for values needed in the async processing loop to avoid stale closure issues
   const stopRef = useRef(false);
   const pauseRef = useRef(false);
   const queueRef = useRef<MatchResult[]>([]);
 
-  // Keep refs in sync with state for the UI
   useEffect(() => {
     pauseRef.current = isPaused;
   }, [isPaused]);
@@ -55,7 +89,6 @@ const App: React.FC = () => {
     stopRef.current = true;
     setIsProcessing(false);
     setIsPaused(false);
-    // Mark remaining pending items as cancelled
     setResults(prev => prev.map(r => r.status === 'pending' || r.status === 'processing' ? { ...r, status: 'error', error: 'Audit stopped by user' } : r));
   };
 
@@ -71,13 +104,14 @@ const App: React.FC = () => {
     pauseRef.current = false;
 
     const initialResults: MatchResult[] = rowsToProcess.map((row, idx) => {
-      const ls = getVal(row, ["ls supplier name", "ls name", "supplier ls"]);
-      const dbm = getVal(row, ["dbm supplier name", "dbm name", "supplier dbm"]);
+      // Expanded aliases to catch more variations of header names
+      const ls = getVal(row, ["ls supplier name", "ls name", "supplier ls", "ls"]);
+      const dbm = getVal(row, ["dbm supplier name", "dbm name", "supplier dbm", "dbm"]);
       
       return {
         id: `ID-${idx + 1}`,
-        lsName: ls || "Unnamed Supplier",
-        dbmName: dbm || "Unnamed Supplier",
+        lsName: ls || "Unknown Supplier",
+        dbmName: dbm || "Unknown Supplier",
         isMatch: false,
         domainLS: '',
         domainDBM: '',
@@ -95,7 +129,6 @@ const App: React.FC = () => {
     
     const runBatchWorker = async () => {
       while (queueRef.current.length > 0 && !stopRef.current) {
-        // Handle Pause
         if (pauseRef.current) {
           await new Promise(resolve => setTimeout(resolve, 500));
           continue;
@@ -142,7 +175,7 @@ const App: React.FC = () => {
       const text = await file.text();
       const allRows = parseCSV(text);
       if (allRows.length === 0) {
-        setError("The uploaded CSV is empty.");
+        setError("The uploaded CSV is empty or incorrectly formatted.");
         return;
       }
       startAnalysis(allRows);
@@ -298,7 +331,10 @@ const App: React.FC = () => {
                   <div className="text-2xl font-black text-indigo-600 font-mono">{completedCount} <span className="text-slate-300 font-normal">/</span> {totalCount}</div>
                 </div>
                 <button 
-                  onClick={() => setResults([])}
+                  onClick={() => {
+                    handleStop();
+                    setResults([]);
+                  }}
                   className="p-3 bg-slate-50 hover:bg-indigo-50 rounded-2xl transition-all text-slate-400 hover:text-indigo-600 group border border-slate-100"
                   title="New Audit"
                 >
